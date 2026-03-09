@@ -1,0 +1,460 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Mini Craft — Multiplayer</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box;}
+body{background:#000;overflow:hidden;font-family:'Segoe UI',sans-serif;}
+canvas{display:block;}
+#overlay{position:fixed;inset:0;background:rgba(0,0,0,.88);display:flex;flex-direction:column;align-items:center;justify-content:center;color:#fff;z-index:10;}
+#overlay h1{font-size:2.8rem;font-weight:200;letter-spacing:6px;margin-bottom:6px;}
+#overlay p{color:#aaa;font-size:.85rem;margin-bottom:16px;}
+#overlay input{padding:10px 16px;border-radius:4px;border:1px solid #444;background:#111;color:#fff;font-size:1rem;width:220px;margin-bottom:10px;text-align:center;}
+#overlay button{padding:12px 40px;background:#4a9eff;border:none;color:#fff;font-size:1rem;border-radius:4px;cursor:pointer;}
+#overlay button:hover{background:#3a8eef;}
+#overlay .controls{margin:14px 0;color:#ccc;font-size:.78rem;line-height:2;text-align:center;}
+#hud{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);display:flex;gap:5px;z-index:5;pointer-events:none;}
+.slot{width:52px;height:52px;border:2px solid rgba(255,255,255,.2);border-radius:6px;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;flex-direction:column;gap:2px;}
+.slot.active{border-color:rgba(255,255,255,.85);}
+.slot .icon{width:28px;height:28px;border-radius:3px;}
+.slot .lbl{color:#fff;font-size:8px;opacity:.7;}
+#crosshair{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);color:rgba(255,255,255,.8);font-size:22px;pointer-events:none;z-index:5;}
+#info{position:fixed;top:12px;left:16px;color:rgba(255,255,255,.5);font-size:11px;z-index:5;line-height:1.8;pointer-events:none;}
+#daybar{position:fixed;top:12px;right:16px;width:120px;z-index:5;pointer-events:none;}
+#daybar .dlbl{color:rgba(255,255,255,.45);font-size:10px;margin-bottom:3px;}
+#daybar .bar{height:4px;background:rgba(255,255,255,.15);border-radius:2px;}
+#daybar .fill{height:4px;background:#ffd700;border-radius:2px;}
+#chat-box{position:fixed;bottom:90px;left:16px;width:320px;z-index:6;pointer-events:none;}
+#chat-log{max-height:140px;overflow-y:auto;display:flex;flex-direction:column;gap:3px;}
+.chat-msg{background:rgba(0,0,0,.45);color:#fff;font-size:12px;padding:3px 8px;border-radius:3px;word-break:break-word;}
+#chat-input-wrap{margin-top:6px;display:none;pointer-events:all;}
+#chat-input{width:100%;padding:7px 10px;border-radius:4px;border:1px solid #555;background:rgba(0,0,0,.7);color:#fff;font-size:12px;}
+#pause{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;color:#fff;font-size:1.4rem;font-weight:300;letter-spacing:3px;z-index:8;}
+#players-list{position:fixed;top:12px;right:16px;margin-top:28px;color:rgba(255,255,255,.5);font-size:11px;z-index:5;pointer-events:none;line-height:1.8;}
+</style>
+</head>
+<body>
+<div id="overlay">
+  <h1>MINI CRAFT</h1>
+  <p>Multiplayer Edition</p>
+  <input id="nameInput" maxlength="16" placeholder="Enter your name" value="Player"/>
+  <div class="controls">
+    WASD — Move &nbsp;|&nbsp; Space — Jump<br>
+    Left Click — Break &nbsp;|&nbsp; Right Click — Place<br>
+    Scroll / 1–9 — Block &nbsp;|&nbsp; T — Chat &nbsp;|&nbsp; Esc — Pause
+  </div>
+  <button id="startBtn">Join World</button>
+</div>
+<div id="pause">PAUSED — Click to Resume</div>
+<div id="crosshair">+</div>
+<div id="info">
+  <div id="posInfo">X:0 Y:0 Z:0</div>
+  <div id="blockInfo">Block: Grass</div>
+  <div id="timeInfo">Dawn</div>
+  <div id="pingInfo">Players: 1</div>
+</div>
+<div id="daybar"><div class="dlbl">TIME OF DAY</div><div class="bar"><div class="fill" id="dayFill" style="width:25%"></div></div></div>
+<div id="hud"></div>
+<div id="chat-box">
+  <div id="chat-log"></div>
+  <div id="chat-input-wrap"><input id="chat-input" maxlength="200" placeholder="Press Enter to send…"/></div>
+</div>
+<canvas id="c"></canvas>
+
+<!-- Socket.io loaded from same origin at runtime -->
+<script>
+// Dynamically load socket.io from the server
+(function(){
+  const s=document.createElement('script');
+  s.src='/socket.io/socket.io.js';
+  document.head.appendChild(s);
+  s.onload=init;
+})();
+</script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+// ─── Blocks ──────────────────────────────────────────────────────────────────
+const BLOCKS=[
+  {name:'Grass', top:'#5a9e3a',side:'#6b7c3f',bot:'#8B6914'},
+  {name:'Dirt',  top:'#8B6914',side:'#7a5c10',bot:'#8B6914'},
+  {name:'Stone', top:'#888',   side:'#808080',bot:'#888'},
+  {name:'Wood',  top:'#a07840',side:'#7a5530',bot:'#a07840'},
+  {name:'Sand',  top:'#d4c87a',side:'#cec070',bot:'#d4c87a'},
+  {name:'Snow',  top:'#eeeeff',side:'#ddddee',bot:'#8B6914'},
+  {name:'Lava',  top:'#e84400',side:'#c63000',bot:'#c63000',emit:true},
+  {name:'Glass', top:'#aaddff',side:'#aaddff',bot:'#aaddff',alpha:.45},
+  {name:'Brick', top:'#a0503a',side:'#904030',bot:'#a0503a'},
+  {name:'Water', top:'#1a6fbf',side:'#1a6fbf',bot:'#1a6fbf',alpha:.55,fluid:true},
+];
+const hotbarBlocks=[0,1,2,3,4,5,6,7,8];
+
+// Build hotbar
+const hudEl=document.getElementById('hud');
+hotbarBlocks.forEach((bi,i)=>{
+  const b=BLOCKS[bi], slot=document.createElement('div');
+  slot.className='slot'+(i===0?' active':''); slot.id='slot'+i;
+  const icon=document.createElement('canvas'); icon.className='icon'; icon.width=icon.height=28;
+  const cx=icon.getContext('2d');
+  if(b.alpha)cx.globalAlpha=b.alpha;
+  cx.fillStyle=b.side;cx.fillRect(0,0,28,28);
+  cx.fillStyle=b.top;cx.fillRect(0,0,28,9);cx.globalAlpha=1;
+  const lbl=document.createElement('div');lbl.className='lbl';lbl.textContent=b.name.slice(0,6).toUpperCase();
+  slot.appendChild(icon);slot.appendChild(lbl);hudEl.appendChild(slot);
+});
+
+let selectedBlock=0;
+function updateHotbar(){
+  document.querySelectorAll('.slot').forEach((s,i)=>s.classList.toggle('active',hotbarBlocks[i]===selectedBlock));
+  document.getElementById('blockInfo').textContent='Block: '+BLOCKS[selectedBlock].name;
+}
+
+// ─── Audio ───────────────────────────────────────────────────────────────────
+let AC;
+function initAudio(){AC=new(window.AudioContext||window.webkitAudioContext)();}
+function tone(f,d,type='sine',v=.1){
+  if(!AC)return;
+  const g=AC.createGain(),o=AC.createOscillator();
+  o.type=type;o.frequency.value=f;
+  g.gain.setValueAtTime(v,AC.currentTime);
+  g.gain.exponentialRampToValueAtTime(.001,AC.currentTime+d);
+  o.connect(g);g.connect(AC.destination);o.start();o.stop(AC.currentTime+d);
+}
+function sfxBreak(){tone(120,.12,'sawtooth',.12);tone(90,.18,'sawtooth',.08);}
+function sfxPlace(){tone(200,.08,'square',.1);}
+function sfxJump(){tone(350,.1,'sine',.08);}
+
+// ─── Three.js ────────────────────────────────────────────────────────────────
+const canvas=document.getElementById('c');
+const renderer=new THREE.WebGLRenderer({canvas,antialias:true});
+renderer.setSize(innerWidth,innerHeight);
+renderer.shadowMap.enabled=true;
+const scene=new THREE.Scene();
+scene.fog=new THREE.FogExp2(0x87ceeb,.018);
+const camera=new THREE.PerspectiveCamera(75,innerWidth/innerHeight,.1,150);
+
+const sunLight=new THREE.DirectionalLight(0xfff5e0,1.2);
+sunLight.castShadow=true;
+sunLight.shadow.mapSize.set(1024,1024);
+const sc=sunLight.shadow.camera;
+sc.near=.5;sc.far=200;sc.left=sc.bottom=-60;sc.right=sc.top=60;
+scene.add(sunLight);
+const moonLight=new THREE.DirectionalLight(0x8888cc,.3);scene.add(moonLight);
+const ambient=new THREE.AmbientLight(0xffffff,.5);scene.add(ambient);
+
+const starGeo=new THREE.BufferGeometry();
+const sp=[];
+for(let i=0;i<800;i++){
+  const r=90,th=Math.random()*Math.PI*2,ph=Math.random()*Math.PI;
+  sp.push(r*Math.sin(ph)*Math.cos(th),r*Math.cos(ph),r*Math.sin(ph)*Math.sin(th));
+}
+starGeo.setAttribute('position',new THREE.Float32BufferAttribute(sp,3));
+const stars=new THREE.Points(starGeo,new THREE.PointsMaterial({color:0xffffff,size:.5}));
+scene.add(stars);
+
+const skyDay=new THREE.Color(0x87ceeb),skyNight=new THREE.Color(0x050510),skyDawn=new THREE.Color(0xff9944);
+let dayTime=.25;
+const DAY_SPEED=1/240;
+
+function updateSky(dt){
+  dayTime=(dayTime+DAY_SPEED*dt)%1;
+  const t=dayTime, angle=(t-.25)*Math.PI*2;
+  sunLight.position.set(Math.cos(angle)*60,Math.sin(angle)*60,20);
+  moonLight.position.set(-Math.cos(angle)*60,-Math.sin(angle)*60,-20);
+  let sky;
+  if(t<.22||t>.78)sky=skyNight.clone();
+  else if(t<.28)sky=skyNight.clone().lerp(skyDawn,(t-.22)/.06);
+  else if(t<.35)sky=skyDawn.clone().lerp(skyDay,(t-.28)/.07);
+  else if(t<.65)sky=skyDay.clone();
+  else if(t<.72)sky=skyDay.clone().lerp(skyDawn,(t-.65)/.07);
+  else if(t<.78)sky=skyDawn.clone().lerp(skyNight,(t-.72)/.06);
+  else sky=skyNight.clone();
+  scene.background=sky;scene.fog.color.copy(sky);
+  const df=Math.max(0,Math.sin(angle));
+  sunLight.intensity=df*1.2;moonLight.intensity=(1-df)*.25;ambient.intensity=.3+df*.4;
+  stars.material.opacity=Math.max(0,1-df*2);
+  document.getElementById('dayFill').style.width=(t*100)+'%';
+  const labels=['Night','Dawn','Morning','Noon','Afternoon','Dusk','Night'];
+  document.getElementById('timeInfo').textContent=labels[Math.min(Math.floor(((t+.07)%1)*7),6)];
+}
+
+// ─── Block meshes ────────────────────────────────────────────────────────────
+const geo=new THREE.BoxGeometry(1,1,1);
+const blockMats=BLOCKS.map(b=>{
+  return [b.side,b.side,b.top,b.bot||b.top,b.side,b.side].map(c=>{
+    const cv=document.createElement('canvas');cv.width=cv.height=16;
+    const cx=cv.getContext('2d');
+    if(b.alpha)cx.globalAlpha=b.alpha;
+    cx.fillStyle=c;cx.fillRect(0,0,16,16);cx.globalAlpha=1;
+    cx.strokeStyle='rgba(0,0,0,.12)';cx.lineWidth=.5;cx.strokeRect(0,0,16,16);
+    const t=new THREE.CanvasTexture(cv);t.magFilter=THREE.NearestFilter;
+    const m=new THREE.MeshLambertMaterial({map:t});
+    if(b.alpha){m.transparent=true;m.opacity=b.alpha;}
+    if(b.emit){m.emissive=new THREE.Color(0xff4400);m.emissiveIntensity=.4;}
+    return m;
+  });
+});
+
+const meshes={};
+function addMesh(x,y,z,bi){
+  const m=new THREE.Mesh(geo,blockMats[bi]);
+  m.position.set(x,y,z);m.castShadow=true;m.receiveShadow=true;
+  scene.add(m);meshes[`${x},${y},${z}`]=m;
+}
+function removeMesh(x,y,z){
+  const k=`${x},${y},${z}`;if(meshes[k]){scene.remove(meshes[k]);delete meshes[k];}
+}
+
+// ─── Other Players ───────────────────────────────────────────────────────────
+const remotePlayers={}; // id => {mesh, label}
+const nameLabels={}; // id => sprite
+
+function makePlayerMesh(color){
+  const g=new THREE.Group();
+  const bodyGeo=new THREE.BoxGeometry(.6,1,.6);
+  const mat=new THREE.MeshLambertMaterial({color});
+  const body=new THREE.Mesh(bodyGeo,mat);body.position.y=.5;g.add(body);
+  const headGeo=new THREE.BoxGeometry(.65,.65,.65);
+  const head=new THREE.Mesh(headGeo,mat);head.position.y=1.35;g.add(head);
+  return g;
+}
+
+function makeNameSprite(name,color){
+  const cv=document.createElement('canvas');cv.width=256;cv.height=48;
+  const cx=cv.getContext('2d');
+  cx.font='bold 28px Segoe UI';cx.textAlign='center';cx.textBaseline='middle';
+  cx.fillStyle=color;cx.fillText(name,128,24);
+  const tex=new THREE.CanvasTexture(cv);
+  const mat=new THREE.SpriteMaterial({map:tex,transparent:true,depthTest:false});
+  const s=new THREE.Sprite(mat);s.scale.set(2,.4,1);s.position.y=2.2;
+  return s;
+}
+
+function addRemotePlayer(p){
+  if(remotePlayers[p.id])return;
+  const mesh=makePlayerMesh(p.color);
+  mesh.position.set(p.pos.x,p.pos.y,p.pos.z);
+  scene.add(mesh);
+  const sprite=makeNameSprite(p.name,p.color);
+  mesh.add(sprite);
+  remotePlayers[p.id]={mesh};
+}
+function removeRemotePlayer(id){
+  if(remotePlayers[id]){scene.remove(remotePlayers[id].mesh);delete remotePlayers[id];}
+}
+
+// ─── Physics ─────────────────────────────────────────────────────────────────
+const world={};
+function getBlock(x,y,z){return world[`${x},${y},${z}`]??-1;}
+function solidAt(x,y,z){const b=getBlock(Math.round(x),Math.floor(y),Math.round(z));return b>=0&&!BLOCKS[b].fluid;}
+function onGround(p){return solidAt(p.x,p.y-1.02,p.z);}
+function inWater(p){const b=getBlock(Math.round(p.x),Math.floor(p.y-.5),Math.round(p.z));return b===9;}
+
+const player={pos:new THREE.Vector3(0,5,0),vel:new THREE.Vector3(),yaw:0,pitch:0,onGround:false,inWater:false};
+
+// ─── Raycaster ───────────────────────────────────────────────────────────────
+const raycaster=new THREE.Raycaster();
+function getTarget(){
+  raycaster.setFromCamera({x:0,y:0},camera);
+  const hits=raycaster.intersectObjects(Object.values(meshes));
+  if(!hits.length)return null;
+  const h=hits[0];if(h.distance>6)return null;
+  const p=h.point.clone().add(h.face.normal.clone().multiplyScalar(-.5));
+  return{pos:new THREE.Vector3(Math.round(p.x),Math.round(p.y),Math.round(p.z)),normal:h.face.normal.clone()};
+}
+
+// ─── Input ───────────────────────────────────────────────────────────────────
+const keys={};
+document.addEventListener('keydown',e=>{
+  if(chatOpen){
+    if(e.key==='Escape')closeChat();
+    return;
+  }
+  keys[e.code]=true;
+  const n=parseInt(e.key);
+  if(n>=1&&n<=9){selectedBlock=hotbarBlocks[n-1];updateHotbar();}
+  if(e.code==='KeyT'){e.preventDefault();openChat();}
+  if(e.code==='Escape')releaseLock();
+});
+document.addEventListener('keyup',e=>{keys[e.code]=false;});
+document.addEventListener('wheel',e=>{
+  const idx=hotbarBlocks.indexOf(selectedBlock);
+  selectedBlock=hotbarBlocks[(idx+(e.deltaY>0?1:-1)+hotbarBlocks.length)%hotbarBlocks.length];
+  updateHotbar();
+},{passive:true});
+
+let lastClick=0;
+document.addEventListener('mousedown',e=>{
+  if(!locked)return;
+  const now=Date.now();if(now-lastClick<100)return;lastClick=now;
+  const t=getTarget();if(!t)return;
+  if(e.button===0){
+    const{x,y,z}=t.pos;
+    if(getBlock(x,y,z)<0)return;
+    sfxBreak();
+    delete world[`${x},${y},${z}`];removeMesh(x,y,z);
+    socket.emit('blockChange',{x,y,z,blockIdx:-1});
+  }else if(e.button===2){
+    const pp=t.pos.clone().add(t.normal);
+    const{x,y,z}=pp;
+    const py=Math.floor(player.pos.y);
+    if(x===Math.round(player.pos.x)&&(y===py||y===py-1)&&z===Math.round(player.pos.z))return;
+    sfxPlace();
+    world[`${x},${y},${z}`]=selectedBlock;addMesh(x,y,z,selectedBlock);
+    socket.emit('blockChange',{x,y,z,blockIdx:selectedBlock});
+  }
+});
+document.addEventListener('contextmenu',e=>e.preventDefault());
+
+// ─── Chat ─────────────────────────────────────────────────────────────────────
+let chatOpen=false;
+const chatInputWrap=document.getElementById('chat-input-wrap');
+const chatInput=document.getElementById('chat-input');
+function openChat(){
+  chatOpen=true;chatInputWrap.style.display='block';
+  if(locked)releaseLock();
+  chatInput.focus();
+}
+function closeChat(){
+  chatOpen=false;chatInputWrap.style.display='none';chatInput.value='';
+  canvas.requestPointerLock();
+}
+chatInput.addEventListener('keydown',e=>{
+  if(e.key==='Enter'){
+    const msg=chatInput.value.trim();
+    if(msg){socket.emit('chat',msg);}
+    closeChat();e.preventDefault();
+  }
+  if(e.key==='Escape'){closeChat();e.preventDefault();}
+});
+
+function addChatMessage(name,color,msg){
+  const log=document.getElementById('chat-log');
+  const el=document.createElement('div');el.className='chat-msg';
+  el.innerHTML=`<span style="color:${color};font-weight:bold">${name}: </span>${msg}`;
+  log.appendChild(el);log.scrollTop=log.scrollHeight;
+  setTimeout(()=>el.style.opacity='0',8000);
+}
+
+// ─── Pointer lock ─────────────────────────────────────────────────────────────
+let locked=false;
+const overlay=document.getElementById('overlay'),pauseEl=document.getElementById('pause');
+document.addEventListener('pointerlockchange',()=>{
+  locked=document.pointerLockElement===canvas;
+  if(locked){overlay.style.display='none';pauseEl.style.display='none';}
+  else if(!chatOpen&&overlay.style.display==='none')pauseEl.style.display='flex';
+});
+pauseEl.addEventListener('click',()=>canvas.requestPointerLock());
+function releaseLock(){document.exitPointerLock();}
+document.addEventListener('mousemove',e=>{
+  if(!locked)return;
+  player.yaw-=e.movementX*.002;
+  player.pitch=Math.max(-1.4,Math.min(1.4,player.pitch-e.movementY*.002));
+});
+
+// ─── Socket.io + Main Init ────────────────────────────────────────────────────
+let socket;
+function init(){
+  socket=io();
+
+  socket.on('init',({world:w,players,self})=>{
+    // Load world
+    for(const k in w){world[k]=w[k];const[x,y,z]=k.split(',').map(Number);addMesh(x,y,z,w[k]);}
+    // Spawn player
+    player.pos.set(self.pos.x,self.pos.y,self.pos.z);
+    // Add existing players
+    for(const id in players){if(id!==socket.id)addRemotePlayer(players[id]);}
+    updatePlayerCount(Object.keys(players).length);
+  });
+
+  socket.on('playerJoined',p=>{
+    addRemotePlayer(p);
+    addChatMessage('','#aaa',`${p.name} joined the world`);
+    updatePlayerCount(Object.keys(remotePlayers).length+1);
+  });
+  socket.on('playerLeft',id=>{
+    removeRemotePlayer(id);
+    updatePlayerCount(Object.keys(remotePlayers).length+1);
+  });
+  socket.on('playerMoved',({id,pos,yaw})=>{
+    if(remotePlayers[id]){
+      remotePlayers[id].mesh.position.set(pos.x,pos.y,pos.z);
+      remotePlayers[id].mesh.rotation.y=yaw;
+    }
+  });
+  socket.on('blockChanged',({x,y,z,blockIdx})=>{
+    const k=`${x},${y},${z}`;
+    if(blockIdx===-1){delete world[k];removeMesh(x,y,z);}
+    else{world[k]=blockIdx;if(!meshes[k])addMesh(x,y,z,blockIdx);}
+  });
+  socket.on('chat',({name,color,msg})=>addChatMessage(name,color,msg));
+}
+
+function updatePlayerCount(n){
+  document.getElementById('pingInfo').textContent=`Players: ${n}`;
+}
+
+// ─── Start button ─────────────────────────────────────────────────────────────
+document.getElementById('startBtn').addEventListener('click',()=>{
+  initAudio();
+  canvas.requestPointerLock();
+});
+
+// ─── Game loop ────────────────────────────────────────────────────────────────
+const clock=new THREE.Clock();
+let moveTimer=0;
+
+function animate(){
+  requestAnimationFrame(animate);
+  const dt=Math.min(clock.getDelta(),.05);
+  updateSky(dt);
+
+  if(locked&&!chatOpen){
+    const spd=player.inWater?3:5;
+    const fwd=new THREE.Vector3(-Math.sin(player.yaw),0,-Math.cos(player.yaw));
+    const right=new THREE.Vector3(Math.cos(player.yaw),0,-Math.sin(player.yaw));
+    const dir=new THREE.Vector3();
+    if(keys['KeyW'])dir.add(fwd);
+    if(keys['KeyS'])dir.sub(fwd);
+    if(keys['KeyA'])dir.sub(right);
+    if(keys['KeyD'])dir.add(right);
+    if(dir.lengthSq()>0)dir.normalize().multiplyScalar(spd);
+    player.vel.x=dir.x;player.vel.z=dir.z;
+
+    player.inWater=inWater(player.pos);
+    player.onGround=onGround(player.pos);
+    if(keys['Space']){
+      if(player.inWater)player.vel.y=3;
+      else if(player.onGround){player.vel.y=8;sfxJump();}
+    }
+    player.vel.y+=(player.inWater?-6:-20)*dt;
+    if(player.inWater)player.vel.y=Math.max(player.vel.y,-3);
+
+    player.pos.x+=player.vel.x*dt;
+    if(solidAt(player.pos.x,player.pos.y-.5,player.pos.z)||solidAt(player.pos.x,player.pos.y-1.5,player.pos.z)){player.pos.x-=player.vel.x*dt;player.vel.x=0;}
+    player.pos.z+=player.vel.z*dt;
+    if(solidAt(player.pos.x,player.pos.y-.5,player.pos.z)||solidAt(player.pos.x,player.pos.y-1.5,player.pos.z)){player.pos.z-=player.vel.z*dt;player.vel.z=0;}
+    player.pos.y+=player.vel.y*dt;
+    if(player.vel.y<0&&onGround(player.pos)){player.vel.y=0;player.pos.y=Math.round(player.pos.y);}
+    else if(player.vel.y>0&&solidAt(player.pos.x,player.pos.y+.1,player.pos.z))player.vel.y=0;
+    if(player.pos.y<-25){player.pos.set(0,6,0);player.vel.set(0,0,0);}
+
+    camera.position.set(player.pos.x,player.pos.y+.55,player.pos.z);
+    camera.rotation.order='YXZ';camera.rotation.y=player.yaw;camera.rotation.x=player.pitch;
+    document.getElementById('posInfo').textContent=`X:${Math.round(player.pos.x)} Y:${Math.round(player.pos.y)} Z:${Math.round(player.pos.z)}`;
+
+    // Send position ~20x/sec
+    moveTimer+=dt;
+    if(moveTimer>.05&&socket){
+      socket.emit('move',{pos:{x:player.pos.x,y:player.pos.y,z:player.pos.z},yaw:player.yaw,pitch:player.pitch});
+      moveTimer=0;
+    }
+  }
+  renderer.render(scene,camera);
+}
+
+window.addEventListener('resize',()=>{camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight);});
+animate();
+</script>
+</body>
+</html>
